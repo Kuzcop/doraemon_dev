@@ -1,7 +1,7 @@
 """Domain Randomization via Entropy Maximization (DORAEMON)"""
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import sys
-import pdb
+import pdb, math
 from copy import deepcopy
 import time
 
@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from torch.distributions.beta import Beta
 from torch.distributions.normal import Normal
+from torch.distributions import Categorical
+from torch import nn
 from scipy.optimize import LinearConstraint, NonlinearConstraint, minimize, Bounds
 import scipy.stats as st
 
@@ -183,6 +185,31 @@ class DomainRandDistribution():
                 self.parameters[i*2] = float(distr[i]['a'])
                 self.parameters[i*2 + 1] = float(distr[i]['b'])
                 self.to_distr.append(Beta(self.parameters[i*2], self.parameters[i*2 + 1]))
+        elif dr_type == 'GMM':
+            """
+                distr: list of list of dict (optional for initialization)
+                    Each dict should contain:
+                        'min': lower bound
+                        'max': upper bound
+                        'mean': initial mean
+                        'variance': initial variance
+                        'weight': weight of nth Gaussian
+                    Number of dicts per dimension = number of mixture components
+            """
+            self.distr = distr.copy() 
+            self.ndims = len(self.distr)
+            self.num_mixture_models = len(distr[0])
+            self.num_distr_params   = 3 # Mean, variance, and weight
+            self.to_distr = []
+            self.parameters = torch.zeros((self.ndims*self.num_mixture_models*self.num_distr_params), dtype=(torch.float32))
+            for i in range(self.ndims):
+                for j in range(self.num_mixture_models):
+                    idx = (i * self.num_mixture_models + j) * self.num_distr_params
+                    mean = float(distr[i][j]['mean'])
+                    std = math.sqrt(float(distr[i][j]['variance']))
+                    weight = float(distr[i][j]['weight'])
+                    self.parameters[idx:idx + 3] = torch.tensor([mean, std, weight], dtype=torch.float32)
+                    self.to_distr.append(Normal(mean, std))
         else:
             raise Exception('Unknown dr_type:'+str(dr_type))
         
@@ -190,11 +217,29 @@ class DomainRandDistribution():
         return
 
     def sample(self, n_samples=1):
-        if self.dr_type == 'beta':
-            values = []
+        values = []
+        if self.dr_type == 'beta':            
             for i in range(self.ndims):
                 m, M = self.distr[i]['m'], self.distr[i]['M']
                 values.append(self.to_distr[i].sample(sample_shape=(n_samples,)).numpy()*(M - m) + m)
+            return np.array(values).T
+        elif self.dr_type == 'GMM':
+            for i in range(self.ndims):
+                dim_samples = np.zeros(n_samples)
+                # Define distribution to sample from a specific Gaussian in the mixture
+                weights = torch.tensor([self.distr[i][j]['weight'] for j in range(self.num_mixture_models)])
+                normalized_weights = torch.softmax(weights, dim=0)
+                dist_probs = Categorical(normalized_weights)
+                # Choose the mixture component then sample from a truncated Gaussian to fit bounds between m and M
+                for n in range(n_samples):
+                    mixture_model_index = dist_probs.sample().item()
+                    normal_idx = i*self.num_mixture_models + mixture_model_index
+                    dim_samples[n] = self.to_distr[normal_idx].sample().item()
+                    # Truncate sample to [m, M]
+                    m = self.distr[i][mixture_model_index]['m']
+                    M = self.distr[i][mixture_model_index]['M']
+                    dim_samples[n] = np.clip(dim_samples[n], m, M)
+                values.append(dim_samples)
             return np.array(values).T
 
     def sample_univariate(self, i, n_samples=1):
@@ -203,6 +248,20 @@ class DomainRandDistribution():
             m, M = self.distr[i]['m'], self.distr[i]['M']
             values.append(self.to_distr[i].sample(sample_shape=(n_samples,)).numpy())  # *(M - m) + m
             return np.array(values).T
+        elif self.dr_type == 'GMM':
+            values = []
+            weights = torch.tensor([self.distr[i][j]['weight'] for j in range(self.num_mixture_models)])
+            normalized_weights = torch.softmax(weights, dim=0)
+            dist_probs = Categorical(normalized_weights)
+
+            for n in range(n_samples):                
+                mixture_model_index = dist_probs.sample().item()
+                normal_idx = i*self.num_mixture_models + mixture_model_index
+                sample = self.to_distr[normal_idx].sample().item()
+                m = self.distr[i][mixture_model_index]['m']
+                M = self.distr[i][mixture_model_index]['M']
+                values.append(np.clip(sample, m, M))
+            return np.array(values).reshape(-1, 1)
 
     def _univariate_pdf(self, x, i, log=False, to_distr=None, standardize=False):
         """
@@ -229,8 +288,27 @@ class DomainRandDistribution():
                         return torch.exp(to_distr[i].log_prob(torch.tensor(x)))
                     else:
                         return torch.exp(to_distr[i].log_prob(torch.tensor((x-m)/(M-m))))/(M-m)
+        elif self.dr_type == 'GMM':
+            x = x.detach().clone().float()
+            if x.ndim == 0:
+                x = x.unsqueeze(0)
 
-        return
+            weights = torch.tensor([self.distr[i][j]['weight'] for j in range(self.num_mixture_models)],dtype=torch.float32)
+            normalized_weights = torch.softmax(weights, dim=0)
+
+            comp_pdfs = []
+            for j in range(self.num_mixture_models):
+                normal_idx = i * self.num_mixture_models + j
+                dist = to_distr[normal_idx]
+                log_p = dist.log_prob(x)
+                comp_pdfs.append(normalized_weights[j] * torch.exp(log_p))
+
+            pdf = torch.stack(comp_pdfs, dim=0).sum(dim=0)
+
+            if log:
+                return torch.log(pdf + 1e-12)
+            else:
+                return pdf
 
     def pdf(self, x, log=False, requires_grad=False, standardize=False, to_params=None):
         """
@@ -270,7 +348,7 @@ class DomainRandDistribution():
             norm_x[:, i] =  (x[:, i] - m) / (M - m)
         return norm_x
 
-    def kl_divergence(self, q, requires_grad=False, p_params=None, q_params=None):
+    def kl_divergence(self, q, requires_grad=False, p_params=None, q_params=None, num_samples = 1_000):
         """Returns KL_div(self || q)
 
             q: DomainRandDistribution
@@ -298,7 +376,36 @@ class DomainRandDistribution():
             else:
                 return kl_div
 
-    def entropy(self, standardize=False):
+        elif self.dr_type == 'GMM':
+
+            if requires_grad:
+                p_distr, p_params = self._to_distr_with_grad(self, to_params=p_params)
+                q_distr, q_params = self._to_distr_with_grad(q,    to_params=q_params)
+            else:
+                p_distr = self.to_distr
+                q_distr = q.to_distr
+
+            # Monte Carlo estimate
+            kl_total = 0.0
+            for i in range(self.ndims):
+                samples = self.sample_univariate(i, n_samples=num_samples)
+                samples = torch.tensor(samples, dtype=torch.float32)
+
+                # compute log p(x)
+                log_p = self._univariate_pdf(samples, i, log=True)
+
+                # compute log q(x)
+                log_q = q._univariate_pdf(samples, i, log=True)
+
+                # expectation
+                kl_total += (log_p - log_q).mean()
+
+            if requires_grad:
+                return kl_total, p_params, q_params
+            else:
+                return kl_total
+
+    def entropy(self, standardize=False, num_samples = 1_000):
         """Returns entropy of distribution"""
         if self.dr_type == 'beta':
             entropy = 0
@@ -310,21 +417,48 @@ class DomainRandDistribution():
                     m, M = self.distr[i]['m'], self.distr[i]['M']
                     entropy += self.to_distr[i].entropy() + torch.log(torch.tensor(M-m))
 
-            return entropy
-
+        elif self.dr_type == 'GMM':
+            entropy = 0
+            for i in range(self.ndims):
+                samples = self.sample_univariate(i, n_samples=num_samples, dtype=torch.float32)
+                samples = torch.tensor(samples, dtype=torch.float32)
+                log_probs = self._univariate_pdf(samples, i, log=True).flatten()
+                entropy += -log_probs.mean()
+        return entropy
+    
     def _to_distr_with_grad(self, p, to_params=None):
         """
             Returns list of torch Beta distributions
             given a DomainRandDistribution object p
         """
-        if to_params is None:
-            params = p.get_stacked_params()
-            to_params = torch.tensor(params, requires_grad=True)
+        if self.dr_type == 'beta':
+            if to_params is None:
+                params = p.get_stacked_params()
+                to_params = torch.tensor(params, requires_grad=True)
 
-        to_distr = []
-        for i in range(self.ndims):
-            to_distr.append(Beta(to_params[i*2], to_params[i*2 + 1]))
-        return to_distr, to_params
+            to_distr = []
+            for i in range(self.ndims):
+                to_distr.append(Beta(to_params[i*2], to_params[i*2 + 1]))
+            return to_distr, to_params
+        elif self.dr_type == 'GMM':
+            if to_params is None:
+                params = p.get_stacked_params()  # [mu, variance, weight] for each component
+                to_params = torch.tensor(params, requires_grad=True)
+
+            to_distr = []
+            idx = 0
+            for i in range(self.ndims):
+                dim_components = []
+                raw_weights = []
+                for j in range(self.num_mixture_models):
+                    mu = to_params[idx]; idx += 1
+                    sigma = torch.sqrt(torch.nn.functional.softplus(to_params[idx])); idx += 1  # keep >0
+                    dim_components.append(torch.distributions.Normal(mu, sigma))
+                    raw_weights.append(to_params[idx]); idx += 1
+                to_distr.append(dim_components)
+                # to_distr.append([(w, comp) for w, comp in zip(weights, components)])
+
+            return to_distr, to_params
 
     def update_parameters(self, params):
         """Update the current beta parameters"""
@@ -333,8 +467,16 @@ class DomainRandDistribution():
             for i in range(self.ndims):
                 distr[i]['a'] = params[i*2]
                 distr[i]['b'] = params[i*2 + 1]
-
-            self.set(dr_type=self.get_dr_type(), distr=distr)
+        elif self.dr_type == 'GMM':
+            distr = deepcopy(self.distr)
+            for i in range(self.ndims):
+                distr_index = i*self.num_mixture_models*self.num_distr_params
+                for j in range(self.num_mixture_models):
+                    GMM_index = j*self.num_distr_params
+                    distr[i][j]['mean'] = params[distr_index + GMM_index] 
+                    distr[i][j]['variance'] = params[distr_index + GMM_index + 1] 
+                    distr[i][j]['weight'] = params[distr_index + GMM_index + 2]
+        self.set(dr_type=self.get_dr_type(), distr=distr)
 
     def get(self):
         return self.distr
