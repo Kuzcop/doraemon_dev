@@ -356,7 +356,7 @@ class DomainRandDistribution():
                            beta parameters
         """
         assert isinstance(q, DomainRandDistribution)
-        assert self.dr_type == q.dr_type 
+        # assert self.dr_type == q.dr_type 
         
         if self.dr_type == 'beta':
             if requires_grad:
@@ -420,7 +420,7 @@ class DomainRandDistribution():
         elif self.dr_type == 'GMM':
             entropy = 0
             for i in range(self.ndims):
-                samples = self.sample_univariate(i, n_samples=num_samples, dtype=torch.float32)
+                samples = self.sample_univariate(i, n_samples=num_samples)
                 samples = torch.tensor(samples, dtype=torch.float32)
                 log_probs = self._univariate_pdf(samples, i, log=True).flatten()
                 entropy += -log_probs.mean()

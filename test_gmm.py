@@ -18,7 +18,11 @@ class TestGMMDistribution(unittest.TestCase):
                 {'m': -2, 'M': 2, 'mean': -1, 'variance': 0.2, 'weight': 0.3}
             ]
         ]
+        self.beta_distr = [
+            {'m': -2, 'M': 2, 'a': 2, 'b': 2,}
+        ]
         self.gmm_dist_obj = DomainRandDistribution('GMM', self.gmm_distr)
+        self.beta_dist_obj = DomainRandDistribution('beta', self.beta_distr)
 
     def test_initialization(self):
         self.assertEqual(self.gmm_dist_obj.ndims, 1)
@@ -48,24 +52,30 @@ class TestGMMDistribution(unittest.TestCase):
         self.assertEqual(log_pdf_vals.shape[0], 1)
         self.assertTrue(torch.all(log_pdf_vals <= torch.log(pdf_vals + 1e-12)))
 
-    # def test_entropy(self):
-    #     entropy = self.gmm_dist_obj.entropy(num_samples=100)
-    #     self.assertIsInstance(entropy, torch.Tensor)
-    #     self.assertTrue(entropy.item() > 0)
+    def test_entropy(self):
+        entropy = self.gmm_dist_obj.entropy(num_samples=100)
+        print(entropy)
+        self.assertIsInstance(entropy, torch.Tensor)
+        self.assertTrue(entropy.item() > 0)
 
-    # def test_kl_divergence(self):
-    #     # KL(self || self) should be >= 0
-    #     kl = self.gmm_dist_obj.kl_divergence(self.gmm_dist_obj, num_samples=100)
-    #     self.assertTrue(kl >= 0)
+    def test_kl_divergence(self):
+        # KL(self || self) should be >= 0
+        kl = self.gmm_dist_obj.kl_divergence(self.gmm_dist_obj, num_samples=100)
+        print(kl)
+        self.assertTrue(kl >= 0)
 
-    # def test_update_parameters(self):
-    #     # Arrange new parameters: [mean1, var1, weight1, mean2, var2, weight2]
-    #     new_params = np.array([0.1, 0.1, 0.5, 1.9, 0.2, 0.5])
-    #     self.gmm_dist_obj.update_parameters(new_params)
-    #     self.assertAlmostEqual(self.gmm_dist_obj.distr[0][0]['mean'], 0.1)
-    #     self.assertAlmostEqual(self.gmm_dist_obj.distr[0][1]['mean'], 1.9)
-    #     self.assertAlmostEqual(self.gmm_dist_obj.distr[0][0]['weight'], 0.5)
-    #     self.assertAlmostEqual(self.gmm_dist_obj.distr[0][1]['weight'], 0.5)
+        kl = self.gmm_dist_obj.kl_divergence(q=self.beta_dist_obj, p_params=self.gmm_dist_obj, num_samples=100)
+        print(kl)
+        self.assertTrue(kl >= 0)
+
+    def test_update_parameters(self):
+        # Arrange new parameters: [mean1, var1, weight1, mean2, var2, weight2]
+        new_params = np.array([0.1, 0.1, 0.5, 1.9, 0.2, 0.5])
+        self.gmm_dist_obj.update_parameters(new_params)
+        self.assertAlmostEqual(self.gmm_dist_obj.distr[0][0]['mean'], 0.1)
+        self.assertAlmostEqual(self.gmm_dist_obj.distr[0][1]['mean'], 1.9)
+        self.assertAlmostEqual(self.gmm_dist_obj.distr[0][0]['weight'], 0.5)
+        self.assertAlmostEqual(self.gmm_dist_obj.distr[0][1]['weight'], 0.5)
 
 if __name__ == '__main__':
     unittest.main()
