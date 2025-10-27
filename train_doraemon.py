@@ -87,16 +87,29 @@ def main():
         a_start, b_start = np.repeat(args.init_beta_param, len(gt_task)), np.repeat(args.init_beta_param, len(gt_task))
     init_distr = []
     target_distr = []
-    for m, M, a_start_dim, b_start_dim in zip(bounds_low, bounds_high, a_start, b_start):
-        if args.start_from_wide_uniform:
-            init_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
-        else:
-            init_distr.append({'m': m, 'M': M, 'a': a_start_dim, 'b': b_start_dim})
-        target_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
 
-
-    init_distribution = DomainRandDistribution(dr_type='beta',
+    if args.dr_type == 'beta':
+        for m, M, a_start_dim, b_start_dim in zip(bounds_low, bounds_high, a_start, b_start):
+            if args.start_from_wide_uniform:
+                init_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
+            else:
+                init_distr.append({'m': m, 'M': M, 'a': a_start_dim, 'b': b_start_dim})
+            target_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
+        init_distribution = DomainRandDistribution(dr_type='beta',
                                                distr=init_distr)
+    elif args.dr_type == 'GMM':
+        weight = 1.0
+        for m, M in zip(bounds_low, bounds_high):
+            mixture_models = []
+            for _ in range(args.gmm_num_mixtures):
+                mixture_models.append(
+                    {'m': m, 'M': M, 'mean': np.random.uniform(m, M), 'variance': args.init_gmm_variance_param, 'weight': weight},
+                )
+            init_distr.append(mixture_models)
+            target_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
+        init_distribution = DomainRandDistribution(dr_type='GMM',
+                                               distr=init_distr)
+    
     target_distribution = DomainRandDistribution(dr_type='beta',
                                                  distr=target_distr)
     print('init distr:')
@@ -330,6 +343,7 @@ def parse_args():
     parser.add_argument('--critic_dyn_only',    default=False, action='store_true', help='History is filtered out from the critic input')
 
     # DORAEMON params
+    parser.add_argument('--dr_type',         default='GMM', type=str, help='Specifying the underlying PDF used to model each env parameter')
     parser.add_argument('--n_iters',         default=5, type=int, help='Minimum number of DORAEMON opt. iterations (could be more due to early stopping when threshold is reached, if stopAtRewardThreshold is set)')
     parser.add_argument('--performance_lb',  default=None, type=float, help='Performance lower bound for DORAEMON opt. problem. env.reward_threshold is used if None', required=True)
     parser.add_argument('--kl_ub',           default=1, type=float, help='KL upper bound for DORAEMON opt. problem')
@@ -345,6 +359,8 @@ def parse_args():
     parser.add_argument('--prior_constraint',          default=False, action='store_true', help='if true, constraint prior parameters density to be equal to uniform')
     parser.add_argument('--force_success_with_returns', default=False, action='store_true', help='If set, force using returns as a success metric condition even if env.success_metric is defined. A proper corresponding performance_lb needs to be defined.')
     parser.add_argument('--init_beta_param', default=100., type=float, help='Beta distribution initial value for parameters a and b.')
+    parser.add_argument('--gmm_num_mixtures', default=3, type=int, help='Number of Gaussians to use for GMM distribution')
+    parser.add_argument('--init_gmm_variance_param', default=100., type=float, help='GMM distribution initial value for variance.')
 
     # Panda gym specific parameters
     parser.add_argument('--qacc_factor', default=0.3, type=float, help='PandaGym envs kwarg')

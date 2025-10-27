@@ -208,7 +208,7 @@ class DomainRandDistribution():
                     mean = float(distr[i][j]['mean'])
                     std = math.sqrt(float(distr[i][j]['variance']))
                     weight = float(distr[i][j]['weight'])
-                    self.parameters[idx:idx + 3] = torch.tensor([mean, std, weight], dtype=torch.float32)
+                    self.parameters[idx:idx + 3] = torch.tensor([mean, std**2, weight], dtype=torch.float32)
                     self.to_distr.append(Normal(mean, std))
         else:
             raise Exception('Unknown dr_type:'+str(dr_type))
@@ -289,9 +289,9 @@ class DomainRandDistribution():
                     else:
                         return torch.exp(to_distr[i].log_prob(torch.tensor((x-m)/(M-m))))/(M-m)
         elif self.dr_type == 'GMM':
-            x = x.detach().clone().float()
-            if x.ndim == 0:
-                x = x.unsqueeze(0)
+            # x = x.detach().clone().float()
+            # if x.ndim == 0:
+            #     x = x.unsqueeze(0)
 
             weights = torch.tensor([self.distr[i][j]['weight'] for j in range(self.num_mixture_models)],dtype=torch.float32)
             normalized_weights = torch.softmax(weights, dim=0)
@@ -300,7 +300,7 @@ class DomainRandDistribution():
             for j in range(self.num_mixture_models):
                 normal_idx = i * self.num_mixture_models + j
                 dist = to_distr[normal_idx]
-                log_p = dist.log_prob(x)
+                log_p = dist.log_prob(torch.tensor(x))
                 comp_pdfs.append(normalized_weights[j] * torch.exp(log_p))
 
             pdf = torch.stack(comp_pdfs, dim=0).sum(dim=0)
@@ -326,7 +326,7 @@ class DomainRandDistribution():
         if requires_grad:
             custom_to_distr, to_params = self._to_distr_with_grad(self, to_params=to_params)
 
-        if standardize:
+        if standardize and self.dr_type == 'beta':
             x = self._standardize_value(x)
 
         for i in range(self.ndims):
@@ -452,8 +452,8 @@ class DomainRandDistribution():
                 raw_weights = []
                 for j in range(self.num_mixture_models):
                     mu = to_params[idx]; idx += 1
-                    sigma = torch.sqrt(torch.nn.functional.softplus(to_params[idx])); idx += 1  # keep >0
-                    dim_components.append(torch.distributions.Normal(mu, sigma))
+                    std = torch.sqrt(torch.nn.functional.softplus(to_params[idx])); idx += 1  # keep >0
+                    dim_components.append(torch.distributions.Normal(mu, std))
                     raw_weights.append(to_params[idx]); idx += 1
                 to_distr.append(dim_components)
                 # to_distr.append([(w, comp) for w, comp in zip(weights, components)])
@@ -482,7 +482,10 @@ class DomainRandDistribution():
         return self.distr
 
     def get_stacked_bounds(self):
-        return np.array([[item['m'], item['M']] for item in self.distr]).reshape(-1)
+        if self.dr_type == 'beta':
+            return np.array([[item['m'], item['M']] for item in self.distr]).reshape(-1)
+        elif self.dr_type == 'GMM':
+            return np.array([[item[0]['m'], item[0]['M']] for item in self.distr]).reshape(-1)
 
     def get_stacked_params(self):
         return self.parameters.detach().numpy()
@@ -508,10 +511,16 @@ class DomainRandDistribution():
         if self.dr_type == 'beta':
             for i in range(self.ndims):
                 print(f'dim{i}:', self.distr[i])
+        elif self.dr_type == 'GMM':
+            for i in range(self.ndims):
+                print(f'dim{i}:', self.distr[i])
 
     def to_string(self):
         string = ''
         if self.dr_type == 'beta':
+            for i in range(self.ndims):
+                string += f"dim{i}: {self.distr[i]} | "
+        elif self.dr_type == 'GMM':
             for i in range(self.ndims):
                 string += f"dim{i}: {self.distr[i]} | "
         return string
@@ -534,6 +543,39 @@ class DomainRandDistribution():
             d['b'] = stacked_params[i*2 + 1]
             distr.append(d)
         return DomainRandDistribution(dr_type='beta', distr=distr)
+    
+    @staticmethod
+    def GMM_from_stacked(stacked_bounds: np.ndarray, stacked_params: np.ndarray):
+        ndims = stacked_bounds.size // 2
+        per_dim_len = stacked_params.size // ndims
+        K = per_dim_len // 3
+
+        if isinstance(stacked_bounds, np.ndarray):
+            bounds = stacked_bounds
+        else:
+            bounds = stacked_bounds.detach().cpu().numpy()
+
+        distr = []
+        for i in range(ndims):
+            m_i = float(bounds[2*i])
+            M_i = float(bounds[2*i+1])
+            base = i * per_dim_len
+            dim_models = []
+            for j in range(K):
+                mu_param  = stacked_params[base + 3*j + 0]
+                var_param = stacked_params[base + 3*j + 1]  # raw param -> will be softplus'ed in set()
+                w_param   = stacked_params[base + 3*j + 2]  # unnormalized logit
+
+                dim_models.append({
+                    'm': m_i, 'M': M_i,
+                    'mean': mu_param,
+                    'variance': var_param,  # raw; positive transform later
+                    'weight': w_param       # raw logit; normalized at use
+                })
+            distr.append(dim_models)
+
+        return DomainRandDistribution(dr_type='GMM', distr=distr)
+
 
     @staticmethod
     def sigmoid(x, lb=0, up=1):
@@ -579,6 +621,7 @@ class DORAEMON():
                  init_beta_param=100.,
                  beta_param_bounds=None,
                  training_subrtn_kwargs={},
+                 dr_type='GMM',
                  verbose=0):
         """
             training_subrtn: handles the RL training subroutine
@@ -647,6 +690,7 @@ class DORAEMON():
         self.init_distr = deepcopy(init_distr)
         self.current_distr = init_distr
         self.target_distr = target_distr
+        self.dr_type = dr_type
 
         # Lower the bounds if starting from a uniform distribution
         if beta_param_bounds is None:
@@ -801,8 +845,14 @@ class DORAEMON():
 
         def prior_constraint_fn(x_opt):
             """Compute log-density of current distribution at prior point"""
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+            
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                                      stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
 
             prior_density = proposed_distr.pdf(self.prior_point, log=True, standardize=True)
@@ -811,8 +861,14 @@ class DORAEMON():
         def prior_constraint_fn_prime(x_opt):
             """Compute the derivative of log-density of current distribution at prior point"""
             x_opt = torch.tensor(x_opt, requires_grad=True)
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+            
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                            stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
 
             prior_density = proposed_distr.pdf(self.prior_point, log=True, requires_grad=True, standardize=True, to_params=x)[0]
@@ -832,18 +888,32 @@ class DORAEMON():
 
         def kl_constraint_fn(x_opt):
             """Compute KL-divergence between current and proposed distribution."""
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                        
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt 
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                                      stacked_params=x)
+                
             kl_divergence = self.current_distr.kl_divergence(proposed_distr)
             return kl_divergence.detach().numpy() 
 
         def kl_constraint_fn_prime(x_opt):
             """Compute the derivative for the KL-divergence (used for scipy optimizer)."""
             x_opt = torch.tensor(x_opt, requires_grad=True)
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+            
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                                      stacked_params=x)
+                
             kl_divergence, p_params, q_params  = self.current_distr.kl_divergence(proposed_distr, requires_grad=True, q_params=x)
             grads = torch.autograd.grad(kl_divergence, x_opt)
             return np.concatenate([g.detach().numpy() for g in grads])
@@ -860,8 +930,14 @@ class DORAEMON():
 
         def performance_constraint_fn(x_opt, force_robust=None):
             """Compute the expected performance under the proposed distribution."""
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+            
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                                      stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt 
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
 
             importance_sampling = torch.exp(proposed_distr.pdf(dynamics_params, log=True, standardize=True) - self.current_distr.pdf(dynamics_params, log=True, standardize=True))
@@ -899,8 +975,14 @@ class DORAEMON():
         def performance_constraint_fn_prime(x_opt):
             """Compute the derivative for the performance-constraint (used for scipy optimizer)."""
             x_opt = torch.tensor(x_opt, requires_grad=True)
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+            
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                                      stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt 
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
 
             proposed_distr_log_prob, q_params = proposed_distr.pdf(dynamics_params, log=True, requires_grad=True, standardize=True, to_params=x)
@@ -952,8 +1034,15 @@ class DORAEMON():
             """Minimize KL-divergence between the current and the target distribution,
                 s.t. previously defined constraints."""
             x_opt = torch.tensor(x_opt, requires_grad=True)
-            x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
-            proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+            
+            
+            if self.dr_type == 'beta':
+                x = DomainRandDistribution.sigmoid(x_opt, self.min_bound, self.max_bound)
+                proposed_distr = DomainRandDistribution.beta_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
+                                                                      stacked_params=x)
+            elif self.dr_type == 'GMM':
+                x = x_opt 
+                proposed_distr = DomainRandDistribution.GMM_from_stacked(stacked_bounds=self.current_distr.get_stacked_bounds(),
                                                                       stacked_params=x)
 
             kl_divergence, p_params, q_params = proposed_distr.kl_divergence(self.target_distr, requires_grad=True, p_params=x)
@@ -966,7 +1055,10 @@ class DORAEMON():
 
 
         x0 = self.current_distr.get_stacked_params()
-        x0_opt = DomainRandDistribution.inv_sigmoid(x0, self.min_bound, self.max_bound)
+        if self.dr_type == 'beta':
+            x0_opt = DomainRandDistribution.inv_sigmoid(x0, self.min_bound, self.max_bound)
+        else:
+            x0_opt = x0.copy()
 
 
         """
@@ -1002,7 +1094,11 @@ class DORAEMON():
                     if performance_constraint_fn(max_perf_x0_opt) >= self.performance_lower_bound:
                         # Feasible distribution found, Go on with this new starting distribution
                         x0_opt = max_perf_x0_opt
-                        x0 = DomainRandDistribution.sigmoid(x0_opt, self.min_bound, self.max_bound)
+
+                        if self.dr_type == 'beta':
+                            x0 = DomainRandDistribution.sigmoid(x0_opt, self.min_bound, self.max_bound)
+                        elif self.dr_type == 'GMM':
+                            x0 = x0_opt
     
                         wandb.log({"update": 1, 'timestep': self.current_timestep})
                         if self.verbose >= 2:
@@ -1012,7 +1108,11 @@ class DORAEMON():
                     else:
                         # No feasible distribution within the trust region has been found
                         # Keep training with the max performance distribution within the trust region
-                        new_x = DomainRandDistribution.sigmoid(max_perf_x0_opt, self.min_bound, self.max_bound)
+                        
+                        if self.dr_type == 'beta':
+                            new_x = DomainRandDistribution.sigmoid(max_perf_x0_opt, self.min_bound, self.max_bound)
+                        elif self.dr_type == 'GMM':
+                            new_x = max_perf_x0_opt
                         self.current_distr.update_parameters(new_x)
                         wandb.log({"update": -2, 'timestep': self.current_timestep})
                         print(f'No distribution within the trust region satisfies the performance_constraint. ' \
@@ -1063,7 +1163,10 @@ class DORAEMON():
                 print(f"Warning! Update effectively unsuccessful, keeping old values parameters.")
                 new_x_opt = x0_opt
 
-        new_x = DomainRandDistribution.sigmoid(new_x_opt, self.min_bound, self.max_bound)
+        if self.dr_type == 'beta':
+            new_x = DomainRandDistribution.sigmoid(new_x_opt, self.min_bound, self.max_bound)
+        else:
+            new_x = new_x_opt
 
         if self.verbose >= 1:
             print(f'New best params: {new_x}')

@@ -5,6 +5,8 @@ import gym
 import numpy as np
 import torch
 from torch.distributions.beta import Beta
+from torch.distributions.normal import Normal
+from torch.distributions import Categorical
 
 class RandomEnv(gym.Env):
     """Superclass for all environments
@@ -118,8 +120,10 @@ class RandomEnv(gym.Env):
             self._set_multivariateGaussian_distribution(distr['mean'], distr['cov'], (distr['low'] if 'low' in distr else None), (distr['high'] if 'high' in distr else None) )
         elif dr_type == 'beta':
             self._set_beta_distribution(distr)
+        elif dr_type == 'GMM':
+            self._set_GMM_distribution(distr)
         else:
-            raise Exception('Unknown dr_type:'+str(dr_type))
+            raise Exception('Unknown dr_type:'+str(dr_type))        
 
     def get_dr_distribution(self):
         if self.sampling == 'uniform':
@@ -129,6 +133,8 @@ class RandomEnv(gym.Env):
         elif self.sampling == 'gaussian':
             raise ValueError('Not implemented')
         elif self.sampling == 'beta':
+            return self.distr
+        elif self.sampling == 'GMM':
             return self.distr
         else:
             return None
@@ -180,7 +186,16 @@ class RandomEnv(gym.Env):
         self.to_distr = []
         for i in range(len(self.distr)):
             self.to_distr.append(Beta(torch.tensor(self.distr[i]['a'], dtype=torch.float32), torch.tensor(self.distr[i]['b'], dtype=torch.float32)))
-
+    
+    def _set_GMM_distribution(self, distr):
+        self.distr = distr.copy()
+        self.to_distr = []
+        ndims = len(distr)
+        num_mixture_models = len(distr[0])
+        for i in range(ndims):
+            for j in range(num_mixture_models):
+                self.to_distr.append(Normal(torch.tensor(distr[i][j]['mean'], dtype=torch.float32), \
+                                     torch.sqrt(torch.tensor(distr[i][j]['variance'], dtype=torch.float32))))
 
     def set_task_search_bounds(self):
         """Sets the parameter search bounds based on how they are specified in get_search_bounds_mean"""
@@ -280,6 +295,26 @@ class RandomEnv(gym.Env):
                 sample.append(value.item())
 
             return np.array(sample)
+        
+        elif self.sampling == 'GMM':
+            # print(f"Self.distr len {len(self.distr)} Self.to_distr len {len(self.to_distr)}")
+            num_mixture_models = len(self.distr[0])
+            samples = []
+            for i in range(len(self.distr)):
+                # Define distribution to sample from a specific Gaussian in the mixture
+                weights = torch.tensor([self.distr[i][j]['weight'] for j in range(num_mixture_models)])
+                normalized_weights = torch.softmax(weights, dim=0)
+                dist_probs = Categorical(normalized_weights)
+                # Choose the mixture component then sample from a truncated Gaussian to fit bounds between m and M
+                mixture_model_index = dist_probs.sample().item()
+                normal_idx = i*num_mixture_models + mixture_model_index
+                sampled_value = self.to_distr[normal_idx].sample().item()
+                # Truncate sample to [m, M]
+                m = self.distr[i][mixture_model_index]['m']
+                M = self.distr[i][mixture_model_index]['M']
+                samples.append(np.clip(sampled_value, m, M))
+                
+            return np.array(samples)
         else:
             raise ValueError('sampling value of random env needs to be set before using sample_task() or set_random_task(). Set it by uploading a DR distr.')
 
