@@ -1,0 +1,3 @@
+python train_doraemon.py --timesteps="2500000" --eval_freq="100000" --n_iters="25" --now="5" --algo="sac" --dr_percentage="0.95" --gradient_steps="1" --train_until_lb --verbose="2" --hard_performance_constraint --compute_final_heatmap --wandb="disabled" --env="RandomContinuousCartPoleEasy-v0" --kl_ub="0.001" --performance_lb="400" --stack_history="5" --dyn_in_obs --actor_history_only --critic_dyn_only --success_rate_condition="0.5" --seed="42" --dr_type="GMM"
+
+python launch_exps.py script=train_doraemon config=[adaptive+,classicCartpoleEasy,short,succRate50] seed=42 exps.noslurm=true wandb="online" kl_ub=0.001 dr_type="GMM"

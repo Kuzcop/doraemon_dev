@@ -7,6 +7,7 @@ import torch
 from torch.distributions.beta import Beta
 from torch.distributions.normal import Normal
 from torch.distributions import Categorical
+from doraemon.GMM import GMM, truncated_normal
 
 class RandomEnv(gym.Env):
     """Superclass for all environments
@@ -193,9 +194,13 @@ class RandomEnv(gym.Env):
         ndims = len(distr)
         num_mixture_models = len(distr[0])
         for i in range(ndims):
-            for j in range(num_mixture_models):
-                self.to_distr.append(Normal(torch.tensor(distr[i][j]['mean'], dtype=torch.float32), \
-                                     torch.sqrt(torch.tensor(distr[i][j]['variance'], dtype=torch.float32))))
+            means   = [distr[i][j]['mean']   for j in range(num_mixture_models)]
+            stds    = [distr[i][j]['std']    for j in range(num_mixture_models)]
+            weights = [distr[i][j]['weight'] for j in range(num_mixture_models)]
+            m = distr[i][0]['m']
+            M = distr[i][0]['M']
+            self.to_distr.append(GMM(num_mixture_models, means, stds, m, M, weights))
+
 
     def set_task_search_bounds(self):
         """Sets the parameter search bounds based on how they are specified in get_search_bounds_mean"""
@@ -297,23 +302,11 @@ class RandomEnv(gym.Env):
             return np.array(sample)
         
         elif self.sampling == 'GMM':
-            # print(f"Self.distr len {len(self.distr)} Self.to_distr len {len(self.to_distr)}")
-            num_mixture_models = len(self.distr[0])
             samples = []
             for i in range(len(self.distr)):
-                # Define distribution to sample from a specific Gaussian in the mixture
-                weights = torch.tensor([self.distr[i][j]['weight'] for j in range(num_mixture_models)])
-                normalized_weights = torch.softmax(weights, dim=0)
-                dist_probs = Categorical(normalized_weights)
-                # Choose the mixture component then sample from a truncated Gaussian to fit bounds between m and M
-                mixture_model_index = dist_probs.sample().item()
-                normal_idx = i*num_mixture_models + mixture_model_index
-                sampled_value = self.to_distr[normal_idx].sample().item()
-                # Truncate sample to [m, M]
-                m = self.distr[i][mixture_model_index]['m']
-                M = self.distr[i][mixture_model_index]['M']
-                samples.append(np.clip(sampled_value, m, M))
-                
+                # GMM returns a tensor of shape (N,), here N=1
+                val = self.to_distr[i].sample(1)[0].item()
+                samples.append(val)
             return np.array(samples)
         else:
             raise ValueError('sampling value of random env needs to be set before using sample_task() or set_random_task(). Set it by uploading a DR distr.')

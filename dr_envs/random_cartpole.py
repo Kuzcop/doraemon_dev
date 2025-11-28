@@ -476,3 +476,10 @@ gym.envs.register(
     max_episode_steps=500,
     kwargs={"inverted": False, "continuous_action": True, "version": "easy"}
 )
+
+gym.envs.register(
+    id="RandomContinuousCartPoleHard-v0",
+    entry_point="%s:RandomCartPoleEnv" % __name__,
+    max_episode_steps=500,
+    kwargs={"inverted": False, "continuous_action": True, "version": "hard"}
+)

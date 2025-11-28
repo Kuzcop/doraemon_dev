@@ -103,8 +103,12 @@ def main():
             mixture_models = []
             for _ in range(args.gmm_num_mixtures):
                 mixture_models.append(
-                    {'m': m, 'M': M, 'mean': np.random.uniform(m, M), 'variance': args.init_gmm_variance_param, 'weight': weight},
+                    {'m': m, 'M': M, 'mean': np.random.uniform(m, M), 'std': args.init_gmm_std_param, 'weight': weight},
                 )
+
+                # mixture_models.append(
+                #     {'m': m, 'M': M, 'mean': (M-m)/2, 'std': args.init_gmm_std_param, 'weight': weight},
+                # )
             init_distr.append(mixture_models)
             target_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
         init_distribution = DomainRandDistribution(dr_type='GMM',
@@ -229,6 +233,9 @@ def main():
     test_env.set_dr_training(True)
     policy = Policy(algo=args.algo, env=test_env, device=args.device, seed=args.seed, actor_obs_mask=actor_obs_mask, critic_obs_mask=critic_obs_mask)
     policy.load_state_dict(last_policy)
+
+    best_model_path = os.path.join(".", "best_model.pth")
+    torch.save(policy.state_dict(), best_model_path)
 
     mean_reward, std_reward = policy.eval(n_eval_episodes=args.test_episodes)
     print('Test reward and stdev:', mean_reward, std_reward)
@@ -360,7 +367,7 @@ def parse_args():
     parser.add_argument('--force_success_with_returns', default=False, action='store_true', help='If set, force using returns as a success metric condition even if env.success_metric is defined. A proper corresponding performance_lb needs to be defined.')
     parser.add_argument('--init_beta_param', default=100., type=float, help='Beta distribution initial value for parameters a and b.')
     parser.add_argument('--gmm_num_mixtures', default=3, type=int, help='Number of Gaussians to use for GMM distribution')
-    parser.add_argument('--init_gmm_variance_param', default=100., type=float, help='GMM distribution initial value for variance.')
+    parser.add_argument('--init_gmm_std_param', default=1, type=float, help='GMM distribution initial value for std.')
 
     # Panda gym specific parameters
     parser.add_argument('--qacc_factor', default=0.3, type=float, help='PandaGym envs kwarg')
