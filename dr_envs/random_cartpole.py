@@ -256,6 +256,9 @@ class RandomCartPoleEnv(RandomEnv):
             self.pole_length = task[3]
             self.total_mass = (self.pole_mass + self.cart_mass)
         elif self.version == 'easy':
+            # val = np.random.random()
+            # task = [15, val]
+            # print(task)
             self.gravity = task[0]
             self.pole_length = task[1]
         else:

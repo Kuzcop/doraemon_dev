@@ -98,17 +98,29 @@ def main():
         init_distribution = DomainRandDistribution(dr_type='beta',
                                                distr=init_distr)
     elif args.dr_type == 'GMM':
-        weight = 1.0
+        weight = 100.0
         for m, M in zip(bounds_low, bounds_high):
             mixture_models = []
-            for _ in range(args.gmm_num_mixtures):
-                mixture_models.append(
-                    {'m': m, 'M': M, 'mean': np.random.uniform(m, M), 'std': args.init_gmm_std_param, 'weight': weight},
-                )
+            if args.gmm_num_mixtures == 3:
+                nominal_mean = (M+m)/2
+                nominal_std  = 0.1*nominal_mean
 
-                # mixture_models.append(
-                #     {'m': m, 'M': M, 'mean': (M-m)/2, 'std': args.init_gmm_std_param, 'weight': weight},
-                # )
+                means = [nominal_mean - nominal_std, nominal_mean, nominal_mean + nominal_std]
+                # means = [(M+m)/4, nominal_mean, 3*(M+m)/4]
+                
+                for index, _ in enumerate(range(args.gmm_num_mixtures)):
+                    # mixture_models.append(
+                    #     {'m': m, 'M': M, 'mean': np.random.uniform(m, M), 'std': args.init_gmm_std_param, 'weight': weight},
+                    # )
+
+                    mixture_models.append(
+                        {'m': m, 'M': M, 'mean': means[index], 'std': nominal_std, 'weight': weight},
+                    )
+            else:
+                for _ in range(args.gmm_num_mixtures):
+                    mixture_models.append(
+                        {'m': m, 'M': M, 'mean': (M+m)/2, 'std': args.init_gmm_std_param, 'weight': weight},
+                    )
             init_distr.append(mixture_models)
             target_distr.append({'m': m, 'M': M, 'a': 1, 'b': 1})
         init_distribution = DomainRandDistribution(dr_type='GMM',
@@ -185,6 +197,7 @@ def main():
                 prior_constraint=args.prior_constraint,
                 force_success_with_returns=args.force_success_with_returns,
                 init_beta_param=args.init_beta_param,
+                dr_type=args.dr_type,
 
                 # Allow different sigmoid bounds if the starting point is different than the center (only for PandaPush)
                 beta_param_bounds=((np.min(np.concatenate([a_start,b_start])), np.max(np.concatenate([a_start,b_start]))) if args.start_from_id is not None else None),

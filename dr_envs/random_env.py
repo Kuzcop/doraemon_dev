@@ -199,7 +199,7 @@ class RandomEnv(gym.Env):
             weights = [distr[i][j]['weight'] for j in range(num_mixture_models)]
             m = distr[i][0]['m']
             M = distr[i][0]['M']
-            self.to_distr.append(GMM(num_mixture_models, means, stds, m, M, weights))
+            self.to_distr.append(GMM(num_mixture_models, means, stds, m, M, weights=weights))
 
 
     def set_task_search_bounds(self):

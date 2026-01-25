@@ -192,8 +192,8 @@ class DomainRandDistribution():
                     Each dict should contain:
                         'min': lower bound
                         'max': upper bound
-                        'mean': initial mean
-                        'std': initial std
+                        'mean': mean
+                        'std': std
                         'weight': weight of nth Gaussian
                     Number of dicts per dimension = number of mixture components
             """
@@ -367,14 +367,30 @@ class DomainRandDistribution():
             # Monte Carlo estimate
             kl_total = 0.0
             for i in range(self.ndims):
-                samples = self.sample_univariate(i, n_samples=num_samples)
-                samples = torch.tensor(samples, dtype=torch.float64).view(-1)
+ 
+                if requires_grad:
+                    samples = p_distr[i].sample(sample_shape=num_samples, tau=0.1, relaxed=True)
+                else:
+                    samples = p_distr[i].sample(sample_shape=num_samples, relaxed=False)
 
                 # compute log p(x)
-                log_p = self._univariate_pdf(samples, i, log=True)
+                log_p = p_distr[i].log_prob(samples)
 
                 # compute log q(x)
-                log_q = q._univariate_pdf(samples, i, log=True)
+                if q.dr_type == 'beta':
+                    m, M = q.distr[i]['m'], q.distr[i]['M']
+                    if np.isclose(M-m, 0):
+                        log_q = torch.where(
+                            torch.isclose(samples, torch.tensor(m, device=samples.device)),
+                            torch.zeros_like(samples),
+                            torch.full_like(samples, -float('inf'))
+                        )
+                    else:
+                        log_q = q_distr[i].log_prob(torch.tensor((samples-m)/(M-m))) - torch.log(torch.tensor(M-m))
+                elif q.dr_type == 'GMM':
+                    log_q = q_distr[i].log_prob(samples)
+                else:
+                    raise Exception
 
                 # expectation
                 kl_total += (log_p - log_q).mean()
@@ -440,7 +456,7 @@ class DomainRandDistribution():
                     stds.append(std)
                     weights.append(weight)
 
-                to_distr.append(GMM(self.num_mixture_models, means, stds, m_i, M_i, weights))
+                to_distr.append(GMM(self.num_mixture_models, means, stds, m_i, M_i, weights=weights))
 
             return to_distr, to_params
 
