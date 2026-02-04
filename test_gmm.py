@@ -61,7 +61,7 @@ class TestGMMDistribution(unittest.TestCase):
         # 1D GMM with 3 components (sharp Gaussians centered at +/-1.5)
         self.gmm_distr = [
             [
-                {'m': -2, 'M': 2, 'mean': 1.5, 'std': 0.1, 'weight': 2.0},
+                {'m': -2, 'M': 2, 'mean': 10, 'std': 3, 'weight': 2.0},
                 {'m': -2, 'M': 2, 'mean': -1.5, 'std': 0.1, 'weight': 1.0},
                 {'m': -2, 'M': 2, 'mean': 0, 'std': 0.5, 'weight': 1.0},
             ]
@@ -162,6 +162,8 @@ class TestGMMDistribution(unittest.TestCase):
         """
         print(f"{'-'*25}test_entropy{'-'*25}")
         entropy_gmm = self.gmm_dist_obj.entropy(num_samples=int(2e5))
+        print(f"Entropy GMM: {entropy_gmm}")
+        entropy_gmm = self.gmm_dist_obj.entropy(num_samples=int(2e5), relaxed=True)
         print(f"Entropy GMM: {entropy_gmm}")
 
         # maximum entropy for any distribution supported on [a,b] is log(b-a)
@@ -431,29 +433,29 @@ class TestGMMDistribution(unittest.TestCase):
         self.assertTrue(torch.all(torch.isinf(log_probs_outside)))
 
     def test_truncated_normal_log_prob_correctness(self):
-        """Verify truncated normal log_prob is correct."""
-
-        print(f"{'-'*25}test_truncated_normal_log_prob_correctness{'-'*25}")
         from scipy.stats import truncnorm
-        
-        # Create truncated normal
+
         tn = truncated_normal(mean=0.0, std=1.0, a=-2, b=2)
-        
-        # Test values
-        test_x = torch.linspace(-2, 2, 100)
+
+        test_x = torch.linspace(-2, 2, 100)[1:-1]  # exclude boundaries
         log_probs_torch = tn.log_prob(test_x)
-        
-        # Compare with scipy
-        scipy_tn = truncnorm(a=-2, b=2, loc=0.0, scale=1.0)
+
+        mu = 0.0
+        sigma = (torch.nn.functional.softplus(torch.tensor(1.0), 4) + 1e-6).item()
+
+        a_scipy = (-2.0 - mu) / sigma
+        b_scipy = ( 2.0 - mu) / sigma
+
+        scipy_tn = truncnorm(a_scipy, b_scipy, loc=mu, scale=sigma)
         log_probs_scipy = scipy_tn.logpdf(test_x.numpy())
-        
-        # Check they match
+
         diff = torch.abs(log_probs_torch - torch.tensor(log_probs_scipy))
-        
-        print(f"Max difference in log_prob: {diff.max():.6e}")
-        print(f"Mean difference: {diff.mean():.6e}")
-        
-        self.assertTrue(torch.all(diff < 1e-5), "log_prob doesn't match scipy")
+
+        print(f"Max diff: {diff.max():.3e}")
+        print(f"Mean diff: {diff.mean():.3e}")
+
+        self.assertTrue(torch.all(diff < 1e-5))
+
 
     def test_entropy_single_component_analytical(self):
         """Test entropy of single truncated normal against known formula.

@@ -98,14 +98,14 @@ def main():
         init_distribution = DomainRandDistribution(dr_type='beta',
                                                distr=init_distr)
     elif args.dr_type == 'GMM':
-        weight = 100.0
+        weight = 1.0
         for m, M in zip(bounds_low, bounds_high):
             mixture_models = []
             if args.gmm_num_mixtures == 3:
                 nominal_mean = (M+m)/2
                 nominal_std  = 0.1*nominal_mean
 
-                means = [nominal_mean - nominal_std, nominal_mean, nominal_mean + nominal_std]
+                means = [nominal_mean - 2*nominal_std, nominal_mean, nominal_mean + 2*nominal_std]
                 # means = [(M+m)/4, nominal_mean, 3*(M+m)/4]
                 
                 for index, _ in enumerate(range(args.gmm_num_mixtures)):

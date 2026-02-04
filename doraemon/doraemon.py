@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import sys
 import pdb, math
 from copy import deepcopy
-import time
+import time, warnings
 
 import wandb
 import numpy as np
@@ -229,7 +229,7 @@ class DomainRandDistribution():
         self.dr_type = dr_type
         return
 
-    def sample(self, n_samples=1):
+    def sample(self, n_samples=1, relaxed=False):
         values = []
         if self.dr_type == 'beta':            
             for i in range(self.ndims):
@@ -238,17 +238,19 @@ class DomainRandDistribution():
             return np.array(values).T
         elif self.dr_type == 'GMM':
             for i in range(self.ndims):
-                values.append(self.to_distr[i].sample(sample_shape = (n_samples)).detach().numpy())
+                values.append(self.to_distr[i].sample(sample_shape = (n_samples), relaxed=relaxed).detach().numpy())
             return np.array(values).T
 
-    def sample_univariate(self, i, n_samples=1):
+    def sample_univariate(self, i, n_samples=1, relaxed = True):
         if self.dr_type == 'beta':
             values = []
             m, M = self.distr[i]['m'], self.distr[i]['M']
             values.append(self.to_distr[i].sample(sample_shape=(n_samples,)).numpy())  # *(M - m) + m
             return np.array(values).T
         elif self.dr_type == 'GMM':
-            return self.to_distr[i].sample(sample_shape=(n_samples)).detach().cpu().numpy().reshape(-1, 1)
+            return self.to_distr[i].sample(sample_shape=(n_samples), relaxed=relaxed).detach().cpu().numpy().reshape(-1, 1)
+            # return self.to_distr[i].sample(sample_shape=(n_samples)).detach().cpu().numpy().reshape(-1, 1)
+
 
     def _univariate_pdf(self, x, i, log=False, to_distr=None, standardize=False):
         """
@@ -276,9 +278,6 @@ class DomainRandDistribution():
                     else:
                         return torch.exp(to_distr[i].log_prob(torch.tensor((x-m)/(M-m))))/(M-m)
         elif self.dr_type == 'GMM':
-            # x = x.detach().clone().float()
-            # if x.ndim == 0:
-            #     x = x.unsqueeze(0)
 
             x = torch.as_tensor(x, dtype=torch.float32).view(-1)
 
@@ -386,6 +385,20 @@ class DomainRandDistribution():
                             torch.full_like(samples, -float('inf'))
                         )
                     else:
+                        # eps = 1e-6
+
+                        # z = (samples - m) / (M - m)
+
+                        # # allow tiny numerical violations
+                        # z = torch.clamp(z, eps, 1 - eps)
+
+                        # # optional sanity check (debug only)
+                        # if torch.isnan(z).any() or torch.isinf(z).any():
+                        #     raise RuntimeError("NaN/Inf in Beta transform")
+
+                        # M_minus_m = torch.as_tensor(M - m, device=z.device, dtype=z.dtype)
+                        # log_q = q_distr[i].log_prob(z) - torch.log(M_minus_m)
+
                         log_q = q_distr[i].log_prob(torch.tensor((samples-m)/(M-m))) - torch.log(torch.tensor(M-m))
                 elif q.dr_type == 'GMM':
                     log_q = q_distr[i].log_prob(samples)
@@ -400,7 +413,7 @@ class DomainRandDistribution():
             else:
                 return kl_total
 
-    def entropy(self, standardize=False, num_samples = 1_000):
+    def entropy(self, standardize=False, num_samples = 1_000, relaxed = False):
         """Returns entropy of distribution"""
         if self.dr_type == 'beta':
             entropy = 0
@@ -415,7 +428,7 @@ class DomainRandDistribution():
         elif self.dr_type == 'GMM':
             entropy = 0
             for i in range(self.ndims):
-                samples = self.sample_univariate(i, n_samples=num_samples)
+                samples = self.sample_univariate(i, n_samples=num_samples, relaxed=relaxed)
                 log_probs = self._univariate_pdf(samples, i, log=True)
                 log_probs = torch.clamp(log_probs, min=-1e6)
                 entropy += (-log_probs).mean()
@@ -731,7 +744,22 @@ class DORAEMON():
             self.success_rate_condition = task_solved_condition
 
         self.prior_point = self._get_prior_point(init_distr).reshape(1, -1)  # reshape for batch dimension
-        self.uniform_density_at_prior = 0.
+        
+        if self.dr_type == 'GMM':
+            bounds = self.current_distr.get_stacked_bounds()
+            log_uniform_densities = []
+
+            for i in range(len(bounds)//2):
+                m = bounds[i*2]
+                M = bounds[i*2 + 1]
+                log_uniform_density_i = -np.log(M - m)
+                log_uniform_densities.append(log_uniform_density_i)
+                print(f"Dim {i}: Range [{m}, {M}], Uniform log-density = {log_uniform_density_i}")
+
+            self.log_uniform_density_at_prior = log_uniform_densities
+        else:
+            self.log_uniform_density_at_prior = 0.
+        print(f"Total uniform log-density threshold: {self.log_uniform_density_at_prior}")
 
     def is_there_budget_for_iter(self):
         return self.budget > self.min_training_steps
@@ -882,7 +910,7 @@ class DORAEMON():
             constraints.append(
                 NonlinearConstraint(
                     fun=prior_constraint_fn,
-                    lb=self.uniform_density_at_prior,
+                    lb=self.log_uniform_density_at_prior,
                     ub=np.inf,
                     jac=prior_constraint_fn_prime,
                     keep_feasible=False
